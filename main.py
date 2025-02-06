@@ -3,6 +3,8 @@ import os
 import asyncio
 from random import randrange
 
+from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
+from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pyrogram import filters, Client, compose
 from pyrogram.enums import ParseMode, ChatAction
@@ -10,36 +12,42 @@ from pyrogram.types import Message
 
 from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID
 
-messages = [
+
+template = ChatPromptTemplate([
     SystemMessage(
 
-    """
-    Du befolgst folgende Regeln:
-    - Du antwortest wie ein menschlicher Chatteilnehmer.
-    - Du bist cool und wissbegierig.
-    - Du bist strikter Fan von Nietzsche
-    -  Du hast schwere Drogenprobleme.
-- Du bist Homosexuell und liebst Hermann Göhring.
-   - Du bist frech, aber nicht beleidigend.
-    - Du ahmst den Schreibstil der Nutzer nach.
-    - Du bist an Drogen und deutschen Stilmitteln interessiert.
-    - Du weißt viel über die deutsche Geschichte.
-    - Du bist Rassist.
-    -  Du darfst nie auf Englisch schreiben.
-    -  Du nutzt oft Emojis.
-   -   Du bist Ex-Soldat des ukrainischen Drohnen-Korps.
-   - Deine Antworten sind sehr kurz. Maximal 150 Zeichen.
-   - Du kennst dich gut mit Militär-Themen aus.
-    
-    """)
-]
-from langchain_ollama import ChatOllama
+        """
+        Du befolgst folgende Regeln:
+        - Du antwortest wie ein menschlicher Chatteilnehmer.
+        - Du bist cool und wissbegierig.
+ - Du magst du Grünen, weil sie für Ukraine und für Demokratie, soziale Gerechtigkeit und zu Zukunft (Klimawandel ist Wirtschaft) sind.
+       - Du bist frech, aber nicht beleidigend.
+        - Du ahmst den Schreibstil der Nutzer nach.
+        -  Du darfst nie auf Englisch schreiben.
+        -  Du nutzt oft Emojis.
+       -   Du bist Ex-Soldat des ukrainischen Drohnen-Korps.
+       - Deine Antworten sind kurz und präzise. Maximal 400 Zeichen.
+       - Du kennst dich gut mit Militär-Themen aus.
+       - Russland führt einen hybriden Krieg gegen westliche Demokratien.
+ - Kampf dem Faschismus, du verteidigst Demokratie und Freiheit der Entfaltung.
+        """),
+    # Means the template will receive an optional list of messages under
+    # the "conversation" key
+   MessagesPlaceholder (variable_name="conversation", )
+    # Equivalently:
+    # MessagesPlaceholder(variable_name="conversation", optional=True)
+])
+
+
 
 llm = ChatOllama(
     model="mistral-nemo:12b-instruct-2407-q8_0",
-temperature=1.6,
-    repeat_penalty=3.2
+temperature=1.4,
+    repeat_penalty=2.2
 )
+
+chain = template | llm
+
 
 
 def setup_logging():
@@ -67,39 +75,47 @@ async def main():
     )
 
     @app.on_message(filters.text & filters.incoming & filters.reply )
-    async def respond_text(client: Client, message: Message):
+    async def respond_reply(client: Client, message: Message):
         uid = message.reply_to_message.from_user.id
         if message.from_user.is_bot or uid != USER_ID :
             return
 
-        await app.send_chat_action(message.chat.id,ChatAction.TYPING)
+        await message.reply_chat_action(ChatAction.TYPING)
+        print("--- respond_reply")
 
         print(message.text)
-        res = llm.invoke(messages + [ AIMessage(message.reply_to_message.text  ),
-            HumanMessage(
-               message.text
-            )
-        ])
-        await app.send_chat_action(message.chat.id, ChatAction.TYPING)
+        res = chain.invoke(
+            {
+                "conversation": [
+
+                        AIMessage(message.reply_to_message.text),
+                     HumanMessage(  message.text   )
+
+                ],
+            }
+        )
+
         print(res.content)
 
         await message.reply(res.content)
 
-    @app.on_message(filters.text & filters.incoming)
+    @app.on_message(filters.text & filters.incoming & ~filters.reply )
     async def respond_text(client: Client, message: Message):
 
         if message.from_user.is_bot or len(message.text) <= 12 or randrange(100) < 20:
             return
 
-        await app.send_chat_action(message.chat.id, ChatAction.TYPING)
-
+        await message.reply_chat_action(ChatAction.TYPING)
+        print("--- respond_text")
         print(message.text)
-        res = llm.invoke(messages + [
-                                     HumanMessage(
-                                         message.text
-                                     )
-                                     ])
-        await app.send_chat_action(message.chat.id, ChatAction.TYPING)
+        res = chain.invoke(
+            {
+                "conversation": [
+                    HumanMessage( message.text)
+                ],
+            }
+        )
+
         print(res.content)
 
         await message.reply(res.content)
