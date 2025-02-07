@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DATABASE_URL = os.getenv("DATABASE_URL")
 PASSWORD = os.getenv("PASSWORD")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
