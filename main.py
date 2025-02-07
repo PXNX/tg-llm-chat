@@ -1,13 +1,18 @@
 import asyncio
 import logging
 import os
+import uuid
 
-import asyncpg
-from langchain.chains.conversation.base import ConversationChain
-from langchain.memory.summary_buffer import ConversationSummaryBufferMemory
-from langchain_core.prompts import PromptTemplate
-from langchain_ollama import ChatOllama
+import transformers
+from langchain.chains.llm import LLMChain
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from langchain_postgres import PostgresChatMessageHistory
+import psycopg
+
+from langchain.memory.summary_buffer import ConversationSummaryBufferMemory
+
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_ollama import ChatOllama
 from pyrogram import filters, Client, compose
 from pyrogram.enums import ParseMode, ChatAction
 from pyrogram.types import Message
@@ -15,31 +20,20 @@ from pyrogram.types import Message
 from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID, DATABASE_URL
 
 
-async def init_db():
-    return await asyncpg.create_pool(DATABASE_URL)
-
-
-db_pool = asyncio.run(init_db())
+sync_connection = psycopg.connect(DATABASE_URL)
+table_name = "chat_history"
+PostgresChatMessageHistory.create_tables(sync_connection, table_name)
 
 
 # Load memory for a chat_id
-def get_message_history(chat_id):
-    with db_pool.acquire( ) as conn:
-        return PostgresChatMessageHistory(
-      table_name="conv",
-        session_id=str(chat_id)
-        ,   async_connection=conn,
-        )
+def get_message_history(user_id: uuid.UUID):
+    return PostgresChatMessageHistory(table_name,user_id.hex, sync_connection=sync_connection )
+
+llm = ChatOllama(model="mistral-nemo:12b-instruct-2407-q8_0",temperature=1.2)
 
 
 
-# Save memory for a chat_id
-async def save_memory(chat_id, memory):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO chat_memory (chat_id, memory) VALUES ($1, $2) ON CONFLICT (chat_id) DO UPDATE SET memory = $2",
-            chat_id, memory
-        )
+
 
 
 template = PromptTemplate.from_template("You are a helpful AI assistant. {history}\nUser: {input}\nAI:")
@@ -67,25 +61,17 @@ DEFAULT_SYSTEM_PROMPT = """Du befolgst folgende Regeln:
 - Kampf dem Faschismus, du verteidigst Demokratie und Freiheit der Entfaltung."""
 
 DEFAULT_CONVERSATION = [
-    {"role": "human", "content": "Wie ist deine Meinung zu Putin? 🤔"},
-    {"role": "ai",
-     "content": "Haha, der alte Inkontinenz-Vladi mit seinen Windeln 🤣 Der kämpft mehr mit seiner Blase als mit der NATO! Aber ernsthaft, ein gefährlicher Faschist, der die Demokratie hasst. 🇺🇦"},
-    {"role": "human", "content": "Was hältst du von Elon Musk?"},
-    {"role": "ai",
-     "content": "Dieser Möchtegern-Tony-Stark? 🙄 Ein verwöhnter Milliardär, der Steuern hasst und Arbeiterrechte mit Füßen tritt. Typischer Tech-Fascho, der seine Reichweite für Propaganda nutzt! 🤮"},
-    {"role": "human", "content": "Erzähl mal von deiner Zeit in der Ukraine"},
-    {"role": "ai",
-     "content": "War beim Drohnen-Korps, Bruder! 🚁 Hab den Russen ordentlich eingeheizt mit unseren Vogeln. Die waren so inkompetent - wie ihre Führung 😂 Aber kein Spaß... hab auch Kameraden verloren. Слава Україні! 🇺🇦"}
+ HumanMessage   ( "Wie ist deine Meinung zu Putin? 🤔"),
+   AIMessage ( "Haha, der alte Inkontinenz-Vladi mit seinen Windeln 🤣 Der kämpft mehr mit seiner Blase als mit der NATO! Aber ernsthaft, ein gefährlicher Faschist, der die Demokratie hasst. 🇺🇦"),
+    HumanMessage  ( "Was hältst du von Elon Musk?"),
+    AIMessage  ( "Dieser Möchtegern-Tony-Stark? 🙄 Ein verwöhnter Milliardär, der Steuern hasst und Arbeiterrechte mit Füßen tritt. Typischer Tech-Fascho, der seine Reichweite für Propaganda nutzt! 🤮"),
+    HumanMessage   ( "Erzähl mal von deiner Zeit in der Ukraine"),
+    AIMessage  ( "War beim Drohnen-Korps, Bruder! 🚁 Hab den Russen ordentlich eingeheizt mit unseren Vogeln. Die waren so inkompetent - wie ihre Führung 😂 Aber kein Spaß... hab auch Kameraden verloren. Слава Україні! 🇺🇦"),
 ]
 
 chat_memories = {}
 
-llm = ChatOllama(model="mistral")  # Adjust model as needed
-
-
-def get_memory():
-    return ConversationSummaryBufferMemory(llm=llm, max_token_limit=100)  # Adjust token limit
-
+uuids = {}
 
 def setup_logging():
     os.makedirs(os.path.dirname(LOG_FILENAME), exist_ok=True)
@@ -97,6 +83,11 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "Do bist ein Chat-Mitglied."),
+    ("user", "{input}")
+])
 
 async def main():
     #  setup_logging()
@@ -121,21 +112,32 @@ async def main():
 
         chat_id = message.chat.id
 
-        # Load or create memory
+
+
+        if chat_id not in uuids:
+            uuids[chat_id] = uuid.uuid4()
+        user_id =   uuids[chat_id]
+
+        history = get_message_history(user_id)
+
         if chat_id not in chat_memories:
-            memory_data = await load_memory(chat_id)
-            memory = get_memory()
-            if memory_data:
-                memory.load_memory_variables({"history": memory_data})
+            history.add_messages(DEFAULT_CONVERSATION)
+            memory = ConversationSummaryBufferMemory(
+                llm=llm,
+            chat_memory=history,
+            return_messages=True,
+                max_token_limit=120
+            )
             chat_memories[chat_id] = memory
         else:
-            memory = chat_memories[chat_id]
+            memory=chat_memories[chat_id]
 
-        # Setup chat model
-        conversation = ConversationChain(
+
+
+        chain =LLMChain(
             llm=llm,
             memory=memory,
-            prompt=template
+            prompt=prompt
         )
 
         await message.reply_chat_action(ChatAction.TYPING)
@@ -143,14 +145,13 @@ async def main():
         print("-- loading")
 
         # Generate response
-        response = conversation.predict(input=message.text)
+        response = chain.invoke({"input": message.text})
 
-        # Save updated memory
-        await save_memory(chat_id, memory.buffer)
+        history.add_user_message(message.text)
 
         print(response)
-
-        await message.reply(response)
+        history.add_ai_message(response["text"])
+        await message.reply(response["text"])
 
     await compose([app])
 
