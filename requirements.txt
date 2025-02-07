@@ -1,0 +1,7 @@
+kurigram==2.1.38
+mtprotocrypt==1.2.6.5b0
+ollama==0.4.7
+langchain-ollama==0.2.3
+regex==2024.11.6
+python-dotenv==1.0.1
+langchain-core==0.3.33
