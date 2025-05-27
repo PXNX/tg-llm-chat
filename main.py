@@ -22,19 +22,24 @@ from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID, DAT
 
 sync_connection = psycopg.connect(DATABASE_URL)
 table_name = "chat_history"
+
+print("setting db")
+
 PostgresChatMessageHistory.create_tables(sync_connection, table_name)
+
+
 
 
 # Load memory for a chat_id
 def get_message_history(user_id: uuid.UUID):
     return PostgresChatMessageHistory(table_name,user_id.hex, sync_connection=sync_connection )
 
-llm = ChatOllama(model="mistral-nemo:12b-instruct-2407-q8_0",temperature=1.2)
+llm = ChatOllama(model="jobautomation/OpenEuroLLM-German",temperature=1.2)
 
 
 
 
-
+print("setting up")
 
 template = PromptTemplate.from_template("You are a helpful AI assistant. {history}\nUser: {input}\nAI:")
 
@@ -83,17 +88,20 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
+print("prompting ...")
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "Do bist ein Chat-Mitglied."),
     ("user", "{input}")
 ])
 
+print(prompt)
+
 async def main():
-    #  setup_logging()
+    #setup_logging()
 
     app = Client(
-        name="Mario",
+        name="Nyxi",
         api_id=API_ID,
         api_hash=API_HASH,
         phone_number=PHONE,
@@ -104,6 +112,9 @@ async def main():
 
     @app.on_message(filters.text & filters.incoming & filters.reply)
     async def respond_reply(client: Client, message: Message):
+
+        print("----- respond_reply ---1")
+
         uid = message.reply_to_message.from_user.id
         if message.from_user.is_bot or uid != USER_ID:
             return
@@ -132,7 +143,7 @@ async def main():
         else:
             memory=chat_memories[chat_id]
 
-
+        print("----- chain")
 
         chain =LLMChain(
             llm=llm,
@@ -147,11 +158,18 @@ async def main():
         # Generate response
         response = chain.invoke({"input": message.text})
 
+        print("----- invoked")
+
         history.add_user_message(message.text)
 
         print(response)
-        history.add_ai_message(response["text"])
         await message.reply(response["text"])
+        print("----- ai msg")
+        history.add_ai_message(response["text"])
+
+
+
+
 
     await compose([app])
 
