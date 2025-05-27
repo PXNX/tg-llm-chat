@@ -14,3 +14,5 @@ langchain-community~=0.3.17
 psycopg~=3.2.4
 torch
 transformers
+langgraph~=0.4.7
+langmem~=0.0.27

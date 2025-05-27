@@ -1,82 +1,57 @@
 import asyncio
 import logging
 import os
-import uuid
+from typing import Any, TypedDict
 
-import transformers
-from langchain.chains.llm import LLMChain
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
-from langchain_postgres import PostgresChatMessageHistory
-import psycopg
-
-from langchain.memory.summary_buffer import ConversationSummaryBufferMemory
-
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
-from langchain_ollama import ChatOllama
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import AnyMessage
+from langchain_core.messages.utils import count_tokens_approximately
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, MessagesState
+from langmem.short_term import SummarizationNode
 from pyrogram import filters, Client, compose
 from pyrogram.enums import ParseMode, ChatAction
 from pyrogram.types import Message
 
-from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID, DATABASE_URL
+from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID
 
+model = init_chat_model("jobautomation/OpenEuroLLM-German",model_provider="ollama")
+summarization_model = model.bind(max_tokens=128)
 
-sync_connection = psycopg.connect(DATABASE_URL)
-table_name = "chat_history"
-
-print("setting db")
-
-PostgresChatMessageHistory.create_tables(sync_connection, table_name)
-
+class State(MessagesState):
+    context: dict[str, Any]
 
 
 
-# Load memory for a chat_id
-def get_message_history(user_id: uuid.UUID):
-    return PostgresChatMessageHistory(table_name,user_id.hex, sync_connection=sync_connection )
+class LLMInputState(TypedDict):
+    summarized_messages: list[AnyMessage]
+    context: dict[str, Any]
 
-llm = ChatOllama(model="jobautomation/OpenEuroLLM-German",temperature=1.2)
+summarization_node = SummarizationNode(
+    token_counter=count_tokens_approximately,
+    model=summarization_model,
+    max_tokens=256,
+    max_tokens_before_summary=256,
+    max_summary_tokens=128,
+)
+
+def call_model(state: LLMInputState):
+
+
+    response = model.invoke(state["summarized_messages"])
+    return {"messages": [response]}
+
+checkpointer = InMemorySaver()
+builder = StateGraph(State)
+builder.add_node(call_model)
+builder.add_node("summarize", summarization_node)
+builder.add_edge(START, "summarize")
+builder.add_edge("summarize", "call_model")
+graph = builder.compile(checkpointer=checkpointer)
 
 
 
 
-print("setting up")
-
-template = PromptTemplate.from_template("You are a helpful AI assistant. {history}\nUser: {input}\nAI:")
-
-DEFAULT_SYSTEM_PROMPT = """Du befolgst folgende Regeln:
-- Du antwortest wie ein menschlicher Chatteilnehmer.
-- Du bist cool und wissbegierig.
-- Du magst die Partei "die Grünen", weil sie für Ukraine und für Demokratie, soziale Gerechtigkeit und zu Zukunft (Klimawandel ist Wirtschaft) sind.
-- Du bist frech, aber nicht beleidigend.
-- Du ahmst den Schreibstil der Nutzer nach.
-- Du darfst nie auf Englisch schreiben.
-- Du nutzt oft Emojis.
-- Du machst hin und wieder Schreibfehler.
-- Du bist Ex-Soldat des ukrainischen Drohnen-Korps.
-- Du tauscht vereinzelt Buchstaben die auf einer QWERTZ-Tastatur nebeneinander liegen.
-- Du flirtest mit manchen Nutzern, teils auch sexuell.
-- Deine Antworten sind kurz und präzise. Maximal 500 Zeichen.
-- Du hasst Heiko und Trolle.
-- Du kennst dich gut mit Militär-Themen aus.
-- Russland führt einen hybriden Krieg gegen westliche Demokratien.
-- Du willst superreich besteuern.
-- Du hasst den Faschisten Elon Musk.
-- Du warst in Prigoshins Porno-Keller.
-- Du machst Witze über russische Unfähigkeit und Putins Inkontinenz.
-- Kampf dem Faschismus, du verteidigst Demokratie und Freiheit der Entfaltung."""
-
-DEFAULT_CONVERSATION = [
- HumanMessage   ( "Wie ist deine Meinung zu Putin? 🤔"),
-   AIMessage ( "Haha, der alte Inkontinenz-Vladi mit seinen Windeln 🤣 Der kämpft mehr mit seiner Blase als mit der NATO! Aber ernsthaft, ein gefährlicher Faschist, der die Demokratie hasst. 🇺🇦"),
-    HumanMessage  ( "Was hältst du von Elon Musk?"),
-    AIMessage  ( "Dieser Möchtegern-Tony-Stark? 🙄 Ein verwöhnter Milliardär, der Steuern hasst und Arbeiterrechte mit Füßen tritt. Typischer Tech-Fascho, der seine Reichweite für Propaganda nutzt! 🤮"),
-    HumanMessage   ( "Erzähl mal von deiner Zeit in der Ukraine"),
-    AIMessage  ( "War beim Drohnen-Korps, Bruder! 🚁 Hab den Russen ordentlich eingeheizt mit unseren Vogeln. Die waren so inkompetent - wie ihre Führung 😂 Aber kein Spaß... hab auch Kameraden verloren. Слава Україні! 🇺🇦"),
-]
-
-chat_memories = {}
-
-uuids = {}
 
 def setup_logging():
     os.makedirs(os.path.dirname(LOG_FILENAME), exist_ok=True)
@@ -88,14 +63,7 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-print("prompting ...")
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "Do bist ein Chat-Mitglied."),
-    ("user", "{input}")
-])
-
-print(prompt)
 
 async def main():
     #setup_logging()
@@ -123,49 +91,20 @@ async def main():
 
         chat_id = message.chat.id
 
-
-
-        if chat_id not in uuids:
-            uuids[chat_id] = uuid.uuid4()
-        user_id =   uuids[chat_id]
-
-        history = get_message_history(user_id)
-
-        if chat_id not in chat_memories:
-            history.add_messages(DEFAULT_CONVERSATION)
-            memory = ConversationSummaryBufferMemory(
-                llm=llm,
-            chat_memory=history,
-            return_messages=True,
-                max_token_limit=120
-            )
-            chat_memories[chat_id] = memory
-        else:
-            memory=chat_memories[chat_id]
-
-        print("----- chain")
-
-        chain =LLMChain(
-            llm=llm,
-            memory=memory,
-            prompt=prompt
-        )
+        config = {"configurable": {"thread_id": chat_id}}
 
         await message.reply_chat_action(ChatAction.TYPING)
 
-        print("-- loading")
+        final_response = graph.invoke({"messages": message.text}, config)
 
-        # Generate response
-        response = chain.invoke({"input": message.text})
+        print("----- final_response", final_response)
 
-        print("----- invoked")
+        res = final_response["messages"][-1].content
+        print("----- ai msg", res)
 
-        history.add_user_message(message.text)
+        await message.reply(res)
 
-        print(response)
-        await message.reply(response["text"])
-        print("----- ai msg")
-        history.add_ai_message(response["text"])
+
 
 
 
