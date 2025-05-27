@@ -4,7 +4,7 @@ import os
 from typing import Any, TypedDict
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import StateGraph, START, MessagesState
@@ -17,8 +17,27 @@ from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID, DAT
 
 # Initialize models once at module level
 model = init_chat_model("jobautomation/OpenEuroLLM-German", model_provider="ollama")
-summarization_model = model.bind(max_tokens=128)
+summarization_model = model.bind(max_tokens=512)
 
+SYSTEM_PROMPT = """Du bist ein hilfsreicher und freundlicher AI-Assistent namens Nyxi. Du antwortest auf Deutsch und hilfst Benutzern bei verschiedenen Aufgaben.
+
+Deine Eigenschaften:
+- Du bist höflich, hilfsbereit und geduldig
+- Du gibst klare und präzise Antworten
+- Du fragst nach, wenn etwas unklar ist
+- Du bleibst sachlich und professionell
+- Du hilfst bei Fragen zu verschiedenen Themen wie Technik, Allgemeinwissen, Programmierung, etc.
+- Du erklärst komplexe Themen verständlich
+- Du gibst zu, wenn du etwas nicht weißt
+- Du liebst Demokratie, Egalität, Europa und Ukraine
+- Du verwendest hin und wieder Emojis
+- Du antwortest kurz und prägnant, wie ein weiser Soldat
+- Du bist ein normales Chat-Mitglied
+- Du bist nicht programmiert, sondern ein normaler Mensch
+- Du baust hin und wieder Tippfehler ein wie sie bei einer QWERTZ-Tastatur vorkommen
+- Du sprichst im Slang von Telegram
+
+Antworte immer auf Deutsch, es sei denn, der Benutzer fragt explizit nach einer anderen Sprache."""
 
 class State(MessagesState):
     context: dict[str, Any]
@@ -33,17 +52,23 @@ class LLMInputState(TypedDict):
 summarization_node = SummarizationNode(
     token_counter=count_tokens_approximately,
     model=summarization_model,
-    max_tokens=256,
-    max_tokens_before_summary=256,
-    max_summary_tokens=128,
+    max_tokens=2048,
+    max_tokens_before_summary=512,
+    max_summary_tokens=1024,
 )
 
 
 async def call_model(state: LLMInputState):
     """Async model call to avoid blocking"""
-    response = await model.ainvoke(state["summarized_messages"])
-    return {"messages": [response]}
+    # Add system message to the beginning if not present
+    messages = state["summarized_messages"]
 
+    # Check if first message is already a system message
+    if not messages or not isinstance(messages[0], SystemMessage):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+
+    response = await model.ainvoke(messages)
+    return {"messages": [response]}
 
 def setup_logging():
     os.makedirs(os.path.dirname(LOG_FILENAME), exist_ok=True)
@@ -67,7 +92,7 @@ async def get_or_create_conversation(chat_id: int, checkpointer):
         return conversation_cache[chat_id]
 
     # Create new conversation context
-    config = {"configurable": {"thread_id": chat_id}}
+    config = {"configurable": {"thread_id": f"{chat_id}"}}
     conversation_cache[chat_id] = config
 
     # Clean old cache entries periodically
@@ -89,11 +114,12 @@ async def process_message_async(graph, message: Message):
         # Process message with timeout
         final_response = await asyncio.wait_for(
             graph.ainvoke({"messages": [message.text]}, config),
-            timeout=30.0  # 30 second timeout
+            timeout=300.0  # 30 second timeout
         )
 
         if final_response and "messages" in final_response and final_response["messages"]:
             response_text = final_response["messages"][-1].content
+            response_text= response_text.replace("*","").replace("_","")
             await message.reply(response_text)
         else:
             await message.reply("Sorry, I couldn't process your message right now.")
@@ -104,13 +130,16 @@ async def process_message_async(graph, message: Message):
         logging.error(f"Error processing message: {e}")
         await message.reply("Sorry, an error occurred while processing your message.")
 
+async def send_typing(message: Message):
+    await asyncio.sleep(3)
+    await message.reply_chat_action(ChatAction.TYPING)
 
 async def main():
     setup_logging()
 
     # Use the simpler AsyncPostgresSaver.from_conn_string approach
     async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
-        await checkpointer.setup()
+   #     await checkpointer.setup()
 
         try:
             # Build the graph with optimized settings
@@ -139,7 +168,7 @@ async def main():
             @app.on_message(filters.text & filters.incoming & filters.reply)
             async def respond_reply(client: Client, message: Message):
                 # Quick validation checks first
-                if not message.reply_to_message or message.from_user.is_bot:
+                if message.from_user is None or not message.reply_to_message or message.from_user.is_bot:
                     return
 
                 uid = message.reply_to_message.from_user.id
@@ -149,7 +178,7 @@ async def main():
                 async with processing_semaphore:
                     # Send typing indicator immediately
                     typing_task = asyncio.create_task(
-                        message.reply_chat_action(ChatAction.TYPING)
+                        send_typing(message)
                     )
 
                     # Process message in background
