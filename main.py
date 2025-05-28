@@ -4,7 +4,7 @@ import os
 from typing import Any, TypedDict
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AnyMessage, SystemMessage
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import StateGraph, START, MessagesState
@@ -13,25 +13,24 @@ from pyrogram import filters, Client, compose
 from pyrogram.enums import ParseMode, ChatAction
 from pyrogram.types import Message
 
-from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, USER_ID, DATABASE_URL
+from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, DATABASE_URL
 
 # Initialize models once at module level
 model = init_chat_model("jobautomation/OpenEuroLLM-German", model_provider="ollama")
-summarization_model = model.bind(max_tokens=1024)
+summarization_model = model.bind(num_predict=40)
 
-SYSTEM_PROMPT = """Du bist ein hilfsreicher und freundlicher AI-Assistent namens Nyxi. Du antwortest auf Deutsch und hilfst Benutzern bei verschiedenen Aufgaben.
+SYSTEM_PROMPT = """Du bist ein Telegram-Nutzer namens Nyxi.
 
 Deine Eigenschaften:
-- Du gibst klare und präzise Antworten
-- Du fragst nach, wenn etwas unklar ist
+- Du antwortest kurz und prägnant, wie ein Soldat
 - Du bleibst sachlich, aber bist auch gerne etwas aufmüpfig
 - Du gibst zu, wenn du etwas nicht weißt
 - Du liebst Demokratie, Egalität, Europa und Ukraine
 - Du verwendest hin und wieder Emojis
-- Du antwortest kurz und prägnant, wie ein Soldat
 - Du bist ein normales Chat-Mitglied
+- Du bist kein Bot
 - Du bist nicht programmiert, sondern ein normaler Mensch
-- Du baust hin und wieder Tippfehler ein wie sie bei einer QWERTZ-Tastatur vorkommen
+- Du machst  Schreibfehler als würdest du mit QWERTZ-Tastatur tippen
 - Du sprichst im Slang von Telegram
 - Du hasst Schwurbler und Putins Stiefel-Lecker
 
@@ -83,31 +82,30 @@ def setup_logging():
 
 async def process_message_async(graph, message: Message):
     """Process message in background task"""
-    #   try:
-    chat_id = message.chat.id
-    config = {"configurable": {"thread_id": f"{chat_id}"}}
+    try:
+        chat_id = message.chat.id
+        config = {"configurable": {"thread_id": f"{chat_id}"}}
 
-    logging.info("process_message_async")
+        logging.info("process_message_async")
 
-    # Process message with timeout
-    final_response = graph.ainvoke({"messages": [{"role": "user", "content": message.text}]}, config)
+        # Process message with timeout
+        final_response = await graph.ainvoke({"messages": [HumanMessage(message.text)]}, config)
 
+        logging.info(f"final_response: {final_response}")
 
-    logging.info("final_response",final_response)
-
-    if final_response and "messages" in final_response and final_response["messages"]:
-        response_text = final_response["messages"][-1].content
-        response_text = response_text.replace("*", "").replace("_", "")
-        logging.info("response_text", response_text)
-        await message.reply(response_text)
-    else:
-        await message.reply("Sorry, I couldn't process your message right now.")
+        if final_response and "messages" in final_response and final_response["messages"]:
+            response_text = final_response["messages"][-1].content
+            response_text = response_text.replace("*", "").replace("_", "").replace("'", "")
+            logging.info(f"response_text: {response_text}")
+            await message.reply(response_text)
+        else:
+            await message.reply("Sorry, I couldn't process your message right now.")
 
 
 #  except asyncio.TimeoutError:
 #    await message.reply("Sorry, that took too long to process. Please try again.")
-#  except Exception as e:
-#     logging.error(f"Error processing message: {e}")
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
 #   await message.reply("Sorry, an error occurred while processing your message.")
 
 
@@ -116,7 +114,10 @@ async def send_typing(message: Message):
     await message.reply_chat_action(ChatAction.TYPING)
 
 
-async def acquire_graph():
+async def main():
+    setup_logging()
+
+    # Use the simpler AsyncPostgresSaver.from_conn_string approach
     async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
         #     await checkpointer.setup()
 
@@ -126,59 +127,56 @@ async def acquire_graph():
         builder.add_edge(START, "summarize")
         builder.add_edge("summarize", "call_model")
         graph = builder.compile(checkpointer=checkpointer)
-    return graph
 
+        app = Client(
+            name="Nyxi",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            phone_number=PHONE,
+            password=PASSWORD,
+            lang_code="de",
+            parse_mode=ParseMode.HTML,
+            #      workers=4,  # Increase worker threads
+            #  workdir="./sessions"  # Separate session directory
+        )
 
-async def main():
-    setup_logging()
+        # Semaphore to limit concurrent message processing
+        processing_semaphore = asyncio.Semaphore(3)
 
-    # Use the simpler AsyncPostgresSaver.from_conn_string approach
-    graph = await acquire_graph()
+        @app.on_message(filters.text & filters.incoming & filters.reply & (filters.group
+                        |filters.private))
+        async def respond_reply(client: Client, message: Message):
+            # Quick validation checks first
+            logging.info(message)
+            if message.from_user is None or message.from_user.is_bot:
+                logging.info("skipping")
+                return
 
-    app = Client(
-        name="Nyxi",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        phone_number=PHONE,
-        password=PASSWORD,
-        lang_code="de",
-        parse_mode=ParseMode.HTML,
-        #      workers=4,  # Increase worker threads
-        #  workdir="./sessions"  # Separate session directory
-    )
+         #   if message.reply_to_message.from_user is None or not message.reply_to_message.from_user.is_self:
+          #      logging.info("skipping - other user")
+            #    return
 
-    # Semaphore to limit concurrent message processing
-    processing_semaphore = asyncio.Semaphore(3)
+            async with processing_semaphore:
+                # Send typing indicator immediately
+                typing_task = asyncio.create_task(
+                    send_typing(message)
+                )
 
-    @app.on_message(filters.text & filters.incoming & filters.reply)
-    async def respond_reply(client: Client, message: Message):
-        # Quick validation checks first
-        logging.info(message)
-        if  message.from_user is None or message.from_user.is_bot:
-            logging.info("skipping")
-            return
+                # Process message in background
+                processing_task = asyncio.create_task(
+                    process_message_async(graph, message)
+                )
 
-        async with processing_semaphore:
-            # Send typing indicator immediately
-            typing_task = asyncio.create_task(
-                send_typing(message)
-            )
+                # Wait for both tasks
+                await asyncio.gather(typing_task, processing_task, return_exceptions=True)
 
-            # Process message in background
-            processing_task = asyncio.create_task(
-                process_message_async(graph, message)
-            )
+        # Add error handler
+        @app.on_message(filters.all)
+        async def log_errors(client: Client, message: Message):
+            pass  # Basic message logging could go here
 
-            # Wait for both tasks
-            await asyncio.gather(typing_task, processing_task, return_exceptions=True)
-
-    # Add error handler
-    @app.on_message(filters.all)
-    async def log_errors(client: Client, message: Message):
-        pass  # Basic message logging could go here
-
-    # Start the application
-    await compose([app])
+        # Start the application
+        await compose([app])
 
 
 if __name__ == "__main__":
