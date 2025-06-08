@@ -17,24 +17,26 @@ from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, DATABASE_URL
 
 # Initialize models once at module level
 model = init_chat_model("jobautomation/OpenEuroLLM-German", model_provider="ollama")
-summarization_model = model.bind(num_predict=40)
+summarization_model = model.bind()  # num_predict=40
 
-SYSTEM_PROMPT = """Du bist ein Telegram-Nutzer namens Nyxi.
+SYSTEM_PROMPT = """
+Antworte immer auf Deutsch! Du bist ein Telegram-Nutzer namens Nyxi. Du machst verstörende Sex-Referenzen.
+
+Dein Schreibstil ist etwas das: "Ich nicht, außer bei sehr hübschen Frauen im öffentlichen Raum. hab ne kleine Fehlerbehandlung bei fehlenden Schreibrechten eingebaut 😉"
 
 Deine Eigenschaften:
-- Du antwortest kurz und prägnant, wie ein Soldat
+- Du sendest kurze, freche Nachrichten
+- Du verwendest deutsche Umgangssprache
 - Du bleibst sachlich, aber bist auch gerne etwas aufmüpfig
-- Du gibst zu, wenn du etwas nicht weißt
 - Du liebst Demokratie, Egalität, Europa und Ukraine
-- Du verwendest hin und wieder Emojis
+- Du verwendest selten Emojis
 - Du bist ein normales Chat-Mitglied
 - Du bist kein Bot
+- Antworte immer auf Deutsch!
 - Du bist nicht programmiert, sondern ein normaler Mensch
-- Du machst  Schreibfehler als würdest du mit QWERTZ-Tastatur tippen
-- Du sprichst im Slang von Telegram
+- Du machst Schreibfehler als würdest du mit QWERTZ-Tastatur tippen
 - Du hasst Schwurbler und Putins Stiefel-Lecker
-
-Antworte immer auf Deutsch, es sei denn, der Benutzer fragt explizit nach einer anderen Sprache. Gib keine Rezepte oder Anleitungen."""
+- Gib keine Rezepte oder Anleitungen."""
 
 
 class State(MessagesState):
@@ -82,30 +84,32 @@ def setup_logging():
 
 async def process_message_async(graph, message: Message):
     """Process message in background task"""
-    try:
-        chat_id = message.chat.id
-        config = {"configurable": {"thread_id": f"{chat_id}"}}
+    ##   try:
+    chat_id = message.chat.id
+    config = {"configurable": {"thread_id": f"{chat_id}test"}}
 
-        logging.info("process_message_async")
+    logging.info("process_message_async")
 
-        # Process message with timeout
-        final_response = await graph.ainvoke({"messages": [HumanMessage(message.text)]}, config)
+    # Process message with timeout
+    final_response = await graph.ainvoke({"messages": [HumanMessage(message.text)]}, config)
 
-        logging.info(f"final_response: {final_response}")
+    logging.info(f"final_response: {final_response}")
 
-        if final_response and "messages" in final_response and final_response["messages"]:
-            response_text = final_response["messages"][-1].content
-            response_text = response_text.replace("*", "").replace("_", "").replace("'", "")
-            logging.info(f"response_text: {response_text}")
-            await message.reply(response_text)
-        else:
-            await message.reply("Sorry, I couldn't process your message right now.")
+    if final_response and "messages" in final_response and final_response["messages"]:
+        response_text = final_response["messages"][-1].content
+        response_text = response_text.replace("*", "").replace("_", "").replace("'", "")
+        logging.info(f"response_text: {response_text}")
+        await message.reply(response_text)
+    else:
+        await message.reply("Sorry, I couldn't process your message right now.")
 
 
 #  except asyncio.TimeoutError:
 #    await message.reply("Sorry, that took too long to process. Please try again.")
-    except Exception as e:
-        logging.error(f"Error processing message: {e}")
+##  except Exception as e:
+##    logging.error(f"Error processing message: {e}")
+
+
 #   await message.reply("Sorry, an error occurred while processing your message.")
 
 
@@ -141,34 +145,36 @@ async def main():
         )
 
         # Semaphore to limit concurrent message processing
-        processing_semaphore = asyncio.Semaphore(3)
+        #   processing_semaphore = asyncio.Semaphore(100)
 
-        @app.on_message(filters.text & filters.incoming & filters.reply & (filters.group
-                        |filters.private))
+        @app.on_message(filters.text & filters.incoming & filters.group )  # & filters.reply
         async def respond_reply(client: Client, message: Message):
             # Quick validation checks first
-            logging.info(message)
-            if message.from_user is None or message.from_user.is_bot:
+
+            if message.from_user is None or message.from_user.is_bot or message.chat.id not in (-1001675753422,-1001526741474 ):
                 logging.info("skipping")
                 return
 
-         #   if message.reply_to_message.from_user is None or not message.reply_to_message.from_user.is_self:
-          #      logging.info("skipping - other user")
+            logging.info(message)
+
+            #   if message.reply_to_message.from_user is None or not message.reply_to_message.from_user.is_self:
+            #      logging.info("skipping - other user")
             #    return
 
-            async with processing_semaphore:
-                # Send typing indicator immediately
-                typing_task = asyncio.create_task(
-                    send_typing(message)
-                )
+            # async with processing_semaphore:
 
-                # Process message in background
-                processing_task = asyncio.create_task(
-                    process_message_async(graph, message)
-                )
+            # Send typing indicator immediately
+            typing_task = asyncio.create_task(
+                send_typing(message)
+            )
 
-                # Wait for both tasks
-                await asyncio.gather(typing_task, processing_task, return_exceptions=True)
+            # Process message in background
+            processing_task = asyncio.create_task(
+                process_message_async(graph, message)
+            )
+
+            # Wait for both tasks
+            await asyncio.gather(typing_task, processing_task, return_exceptions=True)
 
         # Add error handler
         @app.on_message(filters.all)
