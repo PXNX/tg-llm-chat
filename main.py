@@ -3,41 +3,43 @@ import logging
 import os
 from typing import Any, TypedDict
 
-from langchain.chat_models import init_chat_model
+from langchain.globals import set_llm_cache
+from langchain_community.cache import SQLiteCache
 from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage
-from langchain_core.messages.utils import count_tokens_approximately
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.graph import StateGraph, START, MessagesState
-from langmem.short_term import SummarizationNode
+from langchain_ollama import ChatOllama
+from langgraph.graph import MessagesState
 from pyrogram import filters, Client, compose
 from pyrogram.enums import ParseMode, ChatAction
 from pyrogram.types import Message
 
-from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE, DATABASE_URL
+from config import LOG_FILENAME, PASSWORD, API_HASH, API_ID, PHONE
 
 # Initialize models once at module level
-model = init_chat_model("jobautomation/OpenEuroLLM-German", model_provider="ollama")
-summarization_model = model.bind()  # num_predict=40
+
+
+llm = ChatOllama(
+    model="jobautomation/OpenEuroLLM-German",
+    temperature=2,
+    # other params...
+)
+set_llm_cache(SQLiteCache(database_path=".langchain.db"))
 
 SYSTEM_PROMPT = """
 Antworte immer auf Deutsch! Du bist ein Telegram-Nutzer namens Nyxi. Du machst verstörende Sex-Referenzen.
 
-Dein Schreibstil ist etwas das: "Ich nicht, außer bei sehr hübschen Frauen im öffentlichen Raum. hab ne kleine Fehlerbehandlung bei fehlenden Schreibrechten eingebaut 😉"
-
 Deine Eigenschaften:
 - Du sendest kurze, freche Nachrichten
 - Du verwendest deutsche Umgangssprache
-- Du bleibst sachlich, aber bist auch gerne etwas aufmüpfig
 - Du liebst Demokratie, Egalität, Europa und Ukraine
 - Du verwendest selten Emojis
 - Du bist ein normales Chat-Mitglied
+- Du dutzt andere Nutzer
 - Du bist kein Bot
-- Antworte immer auf Deutsch!
 - Du bist nicht programmiert, sondern ein normaler Mensch
 - Du machst Schreibfehler als würdest du mit QWERTZ-Tastatur tippen
 - Du hasst Schwurbler und Putins Stiefel-Lecker
 - Gib keine Rezepte oder Anleitungen."""
-
+llm.invoke([SystemMessage(content=SYSTEM_PROMPT)])
 
 class State(MessagesState):
     context: dict[str, Any]
@@ -46,16 +48,6 @@ class State(MessagesState):
 class LLMInputState(TypedDict):
     summarized_messages: list[AnyMessage]
     context: dict[str, Any]
-
-
-# Initialize summarization node once
-summarization_node = SummarizationNode(
-    token_counter=count_tokens_approximately,
-    model=summarization_model,
-    max_tokens=4048,
-    max_tokens_before_summary=1000,
-    max_summary_tokens=2024,
-)
 
 
 async def call_model(state: LLMInputState):
@@ -67,7 +59,7 @@ async def call_model(state: LLMInputState):
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
-    response = await model.ainvoke(messages)
+    response = await llm.ainvoke(messages)
     return {"messages": [response]}
 
 
@@ -81,6 +73,16 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
+async def process_msg(message: Message):
+    logging.info("process_message_async")
+    response = await llm.ainvoke([HumanMessage(message.text)])
+    logging.info(f"response: {response}")
+
+
+    response_text = response.content
+    response_text = response_text.replace("*", "").replace("_", "").replace("'", "")
+    logging.info(f"response_text: {response_text}")
+    await message.reply(response_text)
 
 async def process_message_async(graph, message: Message):
     """Process message in background task"""
@@ -121,68 +123,53 @@ async def send_typing(message: Message):
 async def main():
     setup_logging()
 
-    # Use the simpler AsyncPostgresSaver.from_conn_string approach
-    async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
-        #     await checkpointer.setup()
+    app = Client(
+        name="Nyxi",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        phone_number=PHONE,
+        password=PASSWORD,
+        lang_code="de",
+        parse_mode=ParseMode.HTML,
+        #      workers=4,  # Increase worker threads
+        #  workdir="./sessions"  # Separate session directory
+    )
 
-        builder = StateGraph(State)
-        builder.add_node("call_model", call_model)  # Use async version
-        builder.add_node("summarize", summarization_node)
-        builder.add_edge(START, "summarize")
-        builder.add_edge("summarize", "call_model")
-        graph = builder.compile(checkpointer=checkpointer)
+    # Semaphore to limit concurrent message processing
+    #   processing_semaphore = asyncio.Semaphore(100)
 
-        app = Client(
-            name="Nyxi",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            phone_number=PHONE,
-            password=PASSWORD,
-            lang_code="de",
-            parse_mode=ParseMode.HTML,
-            #      workers=4,  # Increase worker threads
-            #  workdir="./sessions"  # Separate session directory
+    @app.on_message(filters.text & filters.incoming & filters.group)  # & filters.reply
+    async def respond_reply(client: Client, message: Message):
+        # Quick validation checks first
+
+        if message.from_user is None or message.from_user.is_bot or message.chat.id not in (-1001675753422,
+                                                                                            -1001526741474):
+            logging.info("skipping")
+            return
+
+        logging.info(message)
+
+        #   if message.reply_to_message.from_user is None or not message.reply_to_message.from_user.is_self:
+        #      logging.info("skipping - other user")
+        #    return
+
+        # async with processing_semaphore:
+
+        # Send typing indicator immediately
+        typing_task = asyncio.create_task(
+            send_typing(message)
         )
 
-        # Semaphore to limit concurrent message processing
-        #   processing_semaphore = asyncio.Semaphore(100)
+        # Process message in background
+        processing_task = asyncio.create_task(
+         process_msg(message)
+        )
 
-        @app.on_message(filters.text & filters.incoming & filters.group )  # & filters.reply
-        async def respond_reply(client: Client, message: Message):
-            # Quick validation checks first
+        # Wait for both tasks
+        await asyncio.gather(typing_task, processing_task, return_exceptions=True)
 
-            if message.from_user is None or message.from_user.is_bot or message.chat.id not in (-1001675753422,-1001526741474 ):
-                logging.info("skipping")
-                return
-
-            logging.info(message)
-
-            #   if message.reply_to_message.from_user is None or not message.reply_to_message.from_user.is_self:
-            #      logging.info("skipping - other user")
-            #    return
-
-            # async with processing_semaphore:
-
-            # Send typing indicator immediately
-            typing_task = asyncio.create_task(
-                send_typing(message)
-            )
-
-            # Process message in background
-            processing_task = asyncio.create_task(
-                process_message_async(graph, message)
-            )
-
-            # Wait for both tasks
-            await asyncio.gather(typing_task, processing_task, return_exceptions=True)
-
-        # Add error handler
-        @app.on_message(filters.all)
-        async def log_errors(client: Client, message: Message):
-            pass  # Basic message logging could go here
-
-        # Start the application
-        await compose([app])
+    # Start the application
+    await compose([app])
 
 
 if __name__ == "__main__":
