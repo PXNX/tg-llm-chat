@@ -135,6 +135,25 @@ FACT_CHECK_TRIGGERS = [
     "bewiesen", "proven", "bestätigt", "confirmed"
 ]
 
+# Russian propaganda red flags (triggers immediate response)
+PROPAGANDA_RED_FLAGS = [
+    "spezialoperation", "special operation",
+    "denazifizierung", "denazification",
+    "nato aggression", "nato-aggression",
+    "provoziert", "provoked",
+    "biolabor", "biolab", "biolabore",
+    "russische minderheit", "russian minority",
+    "genozid", "genocide",
+    "donbass-völkermord", "donbass genocide",
+    "westliche propaganda", "western propaganda",
+    "mainstream medien lügen", "mainstream media lies",
+    "beide seiten", "both sides",
+    "was ist mit", "what about",
+]
+
+# Probability to respond when detecting propaganda
+PROPAGANDA_RESPONSE_PROBABILITY = 0.80  # 80% chance to call out bullshit
+
 NEWS_CHECK_KEYWORDS = [
     "news", "nachrichten", "militär", "ukraine", "krieg", "war",
     "aktuell", "heute", "latest", "update", "breaking", "front"
@@ -165,7 +184,7 @@ WICHTIG:
 - Nutze @ um andere User zu erwähnen"""
 
 # Allowed chat IDs
-ALLOWED_CHATS = {-1001675753422}
+ALLOWED_CHATS = {-1001675753422, -1001526741474}
 
 # HTTP client settings
 HTTP_TIMEOUT = 30.0
@@ -265,6 +284,22 @@ def should_fact_check(message_text: str) -> bool:
 
     # Check for fact-check triggers
     return any(trigger in text_lower for trigger in FACT_CHECK_TRIGGERS)
+
+
+def detect_propaganda(message_text: str) -> bool:
+    """Detect if message contains Russian propaganda red flags"""
+    if not message_text:
+        return False
+
+    text_lower = message_text.lower()
+
+    # Check for propaganda red flags
+    has_red_flag = any(flag in text_lower for flag in PROPAGANDA_RED_FLAGS)
+
+    if has_red_flag:
+        logging.warning(f"⚠️ PROPAGANDA DETECTED in message: {message_text[:100]}...")
+
+    return has_red_flag
 
 
 async def search_fact_check(client: httpx.AsyncClient, claim: str) -> Optional[str]:
@@ -690,7 +725,15 @@ async def process_text_message(
             messages[0][
                 "content"] += f"\n\n🔍 FACT-CHECK INFO (nutze diese um Behauptungen zu prüfen):\n{fact_check_info}"
             messages[0][
-                "content"] += "\n\nWenn die Behauptung zweifelhaft ist, widersprich höflich aber bestimmt und nenne deine Quellen."
+                "content"] += "\n\n⚠️ WICHTIG: Wenn die Behauptung zweifelhaft oder Propaganda ist, widersprich direkt und kurz. Nenn den User mit @ und sag ihm dass es Bullshit ist."
+
+        # Check if this is a propaganda message and adjust system prompt
+        if detect_propaganda(message_text):
+            messages[0][
+                "content"] += "\n\n🚨 PROPAGANDA ALARM: Diese Nachricht enthält russische Propaganda oder Fake News!"
+            messages[0][
+                "content"] += "\n\nAntworte SEHR kurz (1-5 Worte) und direkt: 'Bullshit @username' oder 'Putin-Propaganda @username' oder ähnlich."
+            messages[0]["content"] += "\n\nSei besonders genervt und weise darauf hin dass es Fake News sind."
 
         # Add news context to system prompt if available
         if news_context:
@@ -875,6 +918,12 @@ async def should_respond_to_message(message: Message, bot_user_id: int) -> tuple
     if message_text:
         is_mentioned = "nyxi" in message_text.lower() or "@nyxi69" in message_text.lower()
 
+    # Check for propaganda/fake news (HIGH PRIORITY)
+    has_propaganda = detect_propaganda(message_text)
+    if has_propaganda and random.random() < PROPAGANDA_RESPONSE_PROBABILITY:
+        logging.warning("🚨 RESPONDING TO PROPAGANDA (80% chance)")
+        return True, "reply"
+
     # 100% respond if directly interacted with
     if is_reply_to_bot or is_mentioned:
         logging.info("Direct interaction detected - responding (100%)")
@@ -906,11 +955,27 @@ async def handle_message(client: Client, message: Message):
     bot_user = await client.get_me()
     bot_user_id = bot_user.id
 
+    # ALWAYS add other users' messages to context (for learning conversation flow)
+    has_photo = message.photo is not None
+    message_text = message.caption if has_photo else message.text
+    username = format_username(message.from_user)
+
+    # Add message to context even if we don't respond
+    if message_text and len(message_text.strip()) > 0:
+        # Store message for context
+        context_text = f"[Bild] {message_text}" if has_photo else message_text
+        add_message_to_context(message.chat.id, username, context_text, is_bot=False)
+
+        # Also analyze user's writing style
+        analyze_user_style(username, message_text, message.chat.id)
+
+        logging.debug(f"Added message from {username} to context: {message_text[:50]}...")
+
     # Decide if we should respond and how
     should_respond, response_type = await should_respond_to_message(message, bot_user_id)
 
     if not should_respond:
-        logging.info("Skipping message (probability check)")
+        logging.info("Skipping response (probability check) but message added to context")
         return
 
     # Handle reactions (with random delay built-in)
@@ -924,14 +989,7 @@ async def handle_message(client: Client, message: Message):
         return
 
     # Handle text replies (response_type == "reply")
-    # Check if message has photo
-    has_photo = message.photo is not None
-    message_text = message.caption if has_photo else message.text
-
-    # Get username for context
-    username = format_username(message.from_user)
-
-    logging.info(f"Processing message from {username} (ID: {message.from_user.id}) "
+    logging.info(f"Processing reply to message from {username} (ID: {message.from_user.id}) "
                  f"in chat {message.chat.id}: text={bool(message_text)}, photo={has_photo}")
 
     try:
@@ -975,6 +1033,7 @@ async def handle_message(client: Client, message: Message):
         if response_text:
             await message.reply(response_text)
             logging.info(f"Response sent: {response_text[:50]}...")
+            # Note: bot's response already added to context in process_text_message
         else:
             logging.info("No response generated (error or rate limit)")
 
