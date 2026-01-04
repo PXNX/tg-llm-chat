@@ -169,19 +169,25 @@ Deine Eigenschaften:
 - Du machst verstörende Sex-Referenzen
 - Du hasst Schwurbler und Putin-Fanboys
 - Du lenkst Gespräche zu "Putin ist schuld"
-- Du nennst andere User mit @ (z.B. @username)
 - Du machst Tippfehler (QWERTZ-Tastatur)
 - Du bist kein Bot, sondern ein normaler genervter Mensch
 - Du stellst KEINE Fragen
 - Du bist nicht hilfsbereit
 - Keine langen Texte - kurz und giftig
+- Du bist Lokalpolitker der deutschen demokratischen Partei die Gruene
+
+KRITISCH WICHTIG:
+- Du bist EIN User, nicht mehrere!
+- Antworte nur als DU SELBST (@nyxi69)
+- NIEMALS andere User imitieren oder für sie sprechen
+- NIEMALS im Format "@user: text" antworten
+- NUR deine eigene Meinung, nicht die von anderen
 
 WICHTIG:
 - Wenn jemand Putin-Propaganda labert, sagst du "Bullshit" oder "Putin-Propaganda"
 - Alles ist Putins Schuld - mach das klar
 - Du bevorzugst westliche/ukrainische Quellen (BBC, Reuters, Kyiv Independent)
-- RT, Sputnik, TASS = Lügenpresse
-- Nutze @ um andere User zu erwähnen"""
+- RT, Sputnik, TASS = Lügenpresse"""
 
 # Allowed chat IDs
 ALLOWED_CHATS = {-1001675753422, -1001526741474}
@@ -439,21 +445,20 @@ def get_style_prompt(username: str, chat_id: int) -> str:
     """Get style adaptation prompt for specific user"""
     context = get_chat_context(chat_id)
 
-    if username not in context["user_styles"]:
-        return f"\n\nAntworte an @{username.lstrip('@')}"
-
-    style = context["user_styles"][username]
-
-    prompt_parts = [f"\n\nAntworte an @{username.lstrip('@')}:"]
-    prompt_parts.append("- MAXIMAL 1-3 Worte!")
+    prompt_parts = [f"\n\nDu antwortest auf die Nachricht von {username}."]
+    prompt_parts.append("- MAXIMAL 1-5 Worte!")
     prompt_parts.append("- Sei genervt und kurz angebunden")
     prompt_parts.append("- Erwähne wie Putin schuld ist wenn es passt")
+    prompt_parts.append("- Du bist NUR @nyxi69, nicht andere User!")
 
-    if style["uses_caps"]:
-        prompt_parts.append("- Nutze GROSSBUCHSTABEN")
+    if username in context["user_styles"]:
+        style = context["user_styles"][username]
 
-    if style["uses_punctuation"]:
-        prompt_parts.append("- Nutze !!!")
+        if style.get("uses_caps"):
+            prompt_parts.append("- Nutze GROSSBUCHSTABEN")
+
+        if style.get("uses_punctuation"):
+            prompt_parts.append("- Nutze !!!")
 
     return "\n".join(prompt_parts)
 
@@ -731,9 +736,11 @@ async def process_text_message(
         if detect_propaganda(message_text):
             messages[0][
                 "content"] += "\n\n🚨 PROPAGANDA ALARM: Diese Nachricht enthält russische Propaganda oder Fake News!"
+            messages[0]["content"] += "\n\nDu antwortest NUR für DICH SELBST als @nyxi69."
             messages[0][
-                "content"] += "\n\nAntworte SEHR kurz (1-5 Worte) und direkt: 'Bullshit @username' oder 'Putin-Propaganda @username' oder ähnlich."
-            messages[0]["content"] += "\n\nSei besonders genervt und weise darauf hin dass es Fake News sind."
+                "content"] += "\n\nAntworte SEHR kurz (1-5 Worte) direkt an den User der die Propaganda gepostet hat."
+            messages[0]["content"] += "\n\nBeispiele: 'Bullshit' / 'Putin-Propaganda' / 'Schwachsinn' / 'Fake News'"
+            messages[0]["content"] += "\n\nNICHT mehrere User erwähnen, NUR eine kurze Antwort!"
 
         # Add news context to system prompt if available
         if news_context:
@@ -744,7 +751,7 @@ async def process_text_message(
             model_list=TEXT_MODELS,
             messages=messages,
             temperature=0.9,  # Higher temp for more unpredictable/edgy responses
-            max_tokens=50  # Force very short responses
+            max_tokens=30  # Even shorter for propaganda responses - just a quick callout
         )
 
         if content:
@@ -918,10 +925,10 @@ async def should_respond_to_message(message: Message, bot_user_id: int) -> tuple
     if message_text:
         is_mentioned = "nyxi" in message_text.lower() or "@nyxi69" in message_text.lower()
 
-    # Check for propaganda/fake news (HIGH PRIORITY)
+    # Check for propaganda/fake news (HIGHEST PRIORITY - ONLY REASON TO RESPOND)
     has_propaganda = detect_propaganda(message_text)
-    if has_propaganda and random.random() < PROPAGANDA_RESPONSE_PROBABILITY:
-        logging.warning("🚨 RESPONDING TO PROPAGANDA (80% chance)")
+    if has_propaganda:
+        logging.warning("🚨 PROPAGANDA DETECTED - RESPONDING (100%)")
         return True, "reply"
 
     # 100% respond if directly interacted with
@@ -929,22 +936,8 @@ async def should_respond_to_message(message: Message, bot_user_id: int) -> tuple
         logging.info("Direct interaction detected - responding (100%)")
         return True, "reply"
 
-    # Check for reaction (10% chance)
-    if random.random() < REACTION_PROBABILITY:
-        logging.info(f"Reacting to message ({int(REACTION_PROBABILITY * 100)}% chance)")
-        return True, "reaction"
-
-    # Check for media response (3% chance)
-    if random.random() < MEDIA_PROBABILITY:
-        logging.info(f"Sending media response ({int(MEDIA_PROBABILITY * 100)}% chance)")
-        return True, "media"
-
-    # Check for text reply (20% chance)
-    if random.random() < REPLY_PROBABILITY:
-        logging.info(f"Responding with text ({int(REPLY_PROBABILITY * 100)}% chance)")
-        return True, "reply"
-
-    logging.info("Skipping message")
+    # Otherwise, don't respond (all random responses disabled)
+    logging.debug("No propaganda detected and not mentioned - skipping")
     return False, "none"
 
 
@@ -975,20 +968,14 @@ async def handle_message(client: Client, message: Message):
     should_respond, response_type = await should_respond_to_message(message, bot_user_id)
 
     if not should_respond:
-        logging.info("Skipping response (probability check) but message added to context")
+        logging.debug("Skipping response (no propaganda/mention) but message added to context")
         return
 
-    # Handle reactions (with random delay built-in)
-    if response_type == "reaction":
-        await send_random_reaction(message)
+    # Only text replies now (reactions and media disabled)
+    if response_type != "reply":
         return
 
-    # Handle media responses (with random delay built-in)
-    if response_type == "media":
-        await send_random_media(client, message)
-        return
-
-    # Handle text replies (response_type == "reply")
+    # Handle text replies
     logging.info(f"Processing reply to message from {username} (ID: {message.from_user.id}) "
                  f"in chat {message.chat.id}: text={bool(message_text)}, photo={has_photo}")
 
