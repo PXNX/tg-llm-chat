@@ -53,6 +53,40 @@ SUMMARIZATION_TRIGGER = 15  # Summarize when this many messages is reached
 # Response probability
 REPLY_PROBABILITY = 0.20  # 20% chance to respond when not replied to
 DIRECT_REPLY_PROBABILITY = 1.0  # 100% when replied to directly
+REACTION_PROBABILITY = 0.10  # 10% chance to react with emoji
+MEDIA_PROBABILITY = 0.03  # 3% chance to send gif/sticker
+
+# Telegram reaction emojis (actual reactions available in Telegram)
+REACTION_EMOJIS = [
+    "👎",  # thumbs down
+    "💩",  # shit/poop
+    "🤮",  # vomit
+    "🤡",  # clown
+    "👀",  # eyes
+    "🤬",  # cursing
+    "🖕",  # middle finger
+    "💔",  # broken heart
+    "🤨",  # raised eyebrow
+    "😐",  # neutral face
+]
+
+# Random delay ranges (in seconds)
+MIN_RESPONSE_DELAY = 1.0
+MAX_RESPONSE_DELAY = 8.0
+
+# GIF/Sticker search terms
+GIF_SEARCH_TERMS = [
+    "facepalm",
+    "eye roll",
+    "disgust",
+    "clown",
+    "middle finger",
+    "whatever",
+    "ukraine",
+    "annoyed",
+    "seriously",
+    "wtf",
+]
 
 # External news sources (prioritizing Western and Ukrainian sources)
 NEWS_SOURCES = {
@@ -131,7 +165,7 @@ WICHTIG:
 - Nutze @ um andere User zu erwähnen"""
 
 # Allowed chat IDs
-ALLOWED_CHATS = {-1001675753422, -1001526741474}
+ALLOWED_CHATS = {-1001675753422}
 
 # HTTP client settings
 HTTP_TIMEOUT = 30.0
@@ -765,8 +799,69 @@ async def send_typing_indicator(message: Message, duration: int = 2):
         logging.error(f"Error sending typing indicator: {e}")
 
 
-async def should_respond_to_message(message: Message, bot_user_id: int) -> bool:
-    """Decide if bot should respond based on reply status and probability"""
+async def send_random_reaction(message: Message) -> bool:
+    """Send a random emoji reaction to a message"""
+    try:
+        # Wait random time before reacting (more natural)
+        delay = random.uniform(MIN_RESPONSE_DELAY, MAX_RESPONSE_DELAY)
+        logging.info(f"Waiting {delay:.1f}s before reacting...")
+        await asyncio.sleep(delay)
+
+        reaction = random.choice(REACTION_EMOJIS)
+        await message.react(reaction)
+        logging.info(f"Sent reaction: {reaction}")
+        return True
+    except Exception as e:
+        logging.error(f"Error sending reaction: {e}")
+        return False
+
+
+async def send_random_media(client: Client, message: Message) -> bool:
+    """Send a random GIF or sticker that fits the context"""
+    try:
+        # Wait random time before responding
+        delay = random.uniform(MIN_RESPONSE_DELAY, MAX_RESPONSE_DELAY)
+        logging.info(f"Waiting {delay:.1f}s before sending media...")
+        await asyncio.sleep(delay)
+
+        # Choose random search term
+        search_term = random.choice(GIF_SEARCH_TERMS)
+
+        # For simplicity, we'll send a GIF using Telegram's built-in GIF search
+        # Note: This requires the bot to have access to inline bots
+        # Alternative: You could maintain a list of GIF file_ids
+
+        # Since we can't easily search GIFs via Pyrogram, we'll use predefined responses
+        # You can expand this with actual GIF file_ids you've collected
+
+        gif_responses = {
+            "facepalm": "🤦‍♂️",
+            "disgust": "🤮",
+            "clown": "🤡",
+            "whatever": "🙄",
+            "ukraine": "🇺🇦",
+        }
+
+        # For now, send a text-based emoji reaction
+        # In production, you'd want to use actual GIF file_ids
+        response = gif_responses.get(search_term, "🤷")
+        await message.reply(response)
+        logging.info(f"Sent media response for: {search_term}")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error sending media: {e}")
+        return False
+
+
+async def should_respond_to_message(message: Message, bot_user_id: int) -> tuple[bool, str]:
+    """
+    Decide if bot should respond based on reply status and probability
+
+    Returns:
+        tuple: (should_respond, response_type)
+        response_type can be: "reply", "reaction", "media", or "none"
+    """
 
     is_reply_to_bot = (
             message.reply_to_message and
@@ -783,13 +878,25 @@ async def should_respond_to_message(message: Message, bot_user_id: int) -> bool:
     # 100% respond if directly interacted with
     if is_reply_to_bot or is_mentioned:
         logging.info("Direct interaction detected - responding (100%)")
-        return True
+        return True, "reply"
 
-    # 20% random chance otherwise
-    should_respond = random.random() < REPLY_PROBABILITY
-    logging.info(
-        f"No direct interaction - {'responding' if should_respond else 'skipping'} ({int(REPLY_PROBABILITY * 100)}% chance)")
-    return should_respond
+    # Check for reaction (10% chance)
+    if random.random() < REACTION_PROBABILITY:
+        logging.info(f"Reacting to message ({int(REACTION_PROBABILITY * 100)}% chance)")
+        return True, "reaction"
+
+    # Check for media response (3% chance)
+    if random.random() < MEDIA_PROBABILITY:
+        logging.info(f"Sending media response ({int(MEDIA_PROBABILITY * 100)}% chance)")
+        return True, "media"
+
+    # Check for text reply (20% chance)
+    if random.random() < REPLY_PROBABILITY:
+        logging.info(f"Responding with text ({int(REPLY_PROBABILITY * 100)}% chance)")
+        return True, "reply"
+
+    logging.info("Skipping message")
+    return False, "none"
 
 
 async def handle_message(client: Client, message: Message):
@@ -799,11 +906,24 @@ async def handle_message(client: Client, message: Message):
     bot_user = await client.get_me()
     bot_user_id = bot_user.id
 
-    # Decide if we should respond
-    if not await should_respond_to_message(message, bot_user_id):
+    # Decide if we should respond and how
+    should_respond, response_type = await should_respond_to_message(message, bot_user_id)
+
+    if not should_respond:
         logging.info("Skipping message (probability check)")
         return
 
+    # Handle reactions (with random delay built-in)
+    if response_type == "reaction":
+        await send_random_reaction(message)
+        return
+
+    # Handle media responses (with random delay built-in)
+    if response_type == "media":
+        await send_random_media(client, message)
+        return
+
+    # Handle text replies (response_type == "reply")
     # Check if message has photo
     has_photo = message.photo is not None
     message_text = message.caption if has_photo else message.text
@@ -815,6 +935,11 @@ async def handle_message(client: Client, message: Message):
                  f"in chat {message.chat.id}: text={bool(message_text)}, photo={has_photo}")
 
     try:
+        # Random delay before responding
+        delay = random.uniform(MIN_RESPONSE_DELAY, MAX_RESPONSE_DELAY)
+        logging.info(f"Waiting {delay:.1f}s before responding...")
+        await asyncio.sleep(delay)
+
         # Start typing indicator
         typing_task = asyncio.create_task(send_typing_indicator(message, duration=2))
 
